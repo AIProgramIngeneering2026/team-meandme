@@ -1,0 +1,1511 @@
+openapi: 3.1.0
+info:
+  title: meandme — анализ фотогалереи
+  version: 1.0.0
+  description: Контракт практики 2 для общего учебного экземпляра. Отмена доступна для ожидающих заданий. Семантика,
+    лимиты и общий роутинг описаны в docs/api/README.md. Все ответы приложения используют JSON и X-Correlation-ID.
+    Даты UTC.
+servers:
+- url: http://localhost:8000
+  description: Адрес будущего локального запуска
+security: []
+paths:
+  /jobs:
+    post:
+      operationId: createJob
+      summary: Создать Job или получить прежний по ключу
+      description: 'Порядок: размер/JSON/форма → поиск ключа → сравнение параметров или проверка операции и каталога
+        → атомарное сохранение. Ключи бессрочны, регистр значим. Повтор после изменения каталога возвращает прежний
+        снимок. Подробности: docs/api/README.md и ADR-0002.'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        description: Один заголовок на запрос. Отсутствующий или неверный ключ даёт 422 invalid_request. Новый ключ
+          означает новую работу.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[A-Za-z0-9_-]+$
+      requestBody:
+        required: true
+        description: До 8192 байт, без сжатия. Лишние поля запрещены.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJob'
+            examples:
+              duplicates:
+                value:
+                  dataset_id: demo-01
+                  operation: find_duplicates
+              quality:
+                value:
+                  dataset_id: demo-01
+                  operation: assess_quality
+      responses:
+        '202':
+          description: Job сохранён; снимок состояния created. Следующее чтение может вернуть новое состояние.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+            Location:
+              description: Путь для чтения состояния Job.
+              schema:
+                type: string
+              example: /jobs/11111111-1111-4111-8111-111111111111
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedJob'
+              examples:
+                created:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    dataset_id: demo-01
+                    operation: find_duplicates
+                    state: created
+                    image_ids:
+                    - photo-10
+                    - photo-29
+                    - photo-10-copy
+                    catalog_version: '1'
+                    analysis_version: '1'
+                    created_at: '2026-11-10T10:00:00Z'
+                    started_at: null
+                    finished_at: null
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                    error: null
+        '200':
+          description: Повтор создания возвращает прежний Job в текущем состоянии, включая cancelled.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              examples:
+                repeated:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    dataset_id: demo-01
+                    operation: find_duplicates
+                    state: done
+                    image_ids:
+                    - photo-10
+                    - photo-29
+                    - photo-10-copy
+                    catalog_version: '1'
+                    analysis_version: '1'
+                    created_at: '2026-11-10T10:00:00Z'
+                    started_at: '2026-11-10T10:00:01Z'
+                    finished_at: '2026-11-10T10:00:03Z'
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                    error: null
+                repeated_cancelled:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    dataset_id: demo-01
+                    operation: find_duplicates
+                    state: cancelled
+                    image_ids:
+                    - photo-10
+                    - photo-29
+                    - photo-10-copy
+                    catalog_version: '1'
+                    analysis_version: '1'
+                    created_at: '2026-11-10T10:00:00Z'
+                    started_at: null
+                    finished_at: '2026-11-10T10:00:01Z'
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                    error: null
+        '400':
+          description: JSON не разбирается или содержит повторяющиеся имена полей. Job не создаётся.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - invalid_json
+              examples:
+                invalid_json:
+                  value:
+                    code: invalid_json
+                    message: Некорректный JSON
+                    details:
+                    - field: body
+                      reason: Проверьте синтаксис и уникальность имён полей
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '409':
+          description: Тот же ключ с другой парой dataset_id/operation; прежний Job не изменяется.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - idempotency_conflict
+              examples:
+                idempotency_conflict:
+                  value:
+                    code: idempotency_conflict
+                    message: Ключ использован с другими параметрами
+                    details:
+                    - field: header.Idempotency-Key
+                      reason: Для новой работы нужен новый ключ
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '413':
+          description: Тело больше 8192 байт, включая поток без достоверного Content-Length.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - request_too_large
+              examples:
+                request_too_large:
+                  value:
+                    code: request_too_large
+                    message: Превышен размер тела запроса
+                    details:
+                    - field: body
+                      reason: Максимум 8192 байта
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '415':
+          description: Не application/json или неподдерживаемое сжатие Content-Encoding.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - unsupported_media_type
+              examples:
+                unsupported_media_type:
+                  value:
+                    code: unsupported_media_type
+                    message: Неподдерживаемое представление тела
+                    details:
+                    - field: header.Content-Type
+                      reason: Нужен application/json без сжатия
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '422':
+          description: Неверные поля, неизвестная операция или набор. Job не создаётся; details указывает поле.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - invalid_request
+                      - unknown_operation
+                      - unknown_dataset
+              examples:
+                invalid_request:
+                  value:
+                    code: invalid_request
+                    message: Неверное поле запроса
+                    details:
+                    - field: body.dataset_id
+                      reason: Обязательная непустая строка
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                unknown_operation:
+                  value:
+                    code: unknown_operation
+                    message: Операция не поддерживается
+                    details:
+                    - field: body.operation
+                      reason: Ожидается find_duplicates или assess_quality
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                unknown_dataset:
+                  value:
+                    code: unknown_dataset
+                    message: Набор не найден в каталоге
+                    details:
+                    - field: body.dataset_id
+                      reason: Передайте известный ID набора
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '503':
+          description: БД недоступна, каталог некорректен или очередь заполнена. При неясной фиксации БД повторите
+            прежний ключ.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - storage_unavailable
+                      - catalog_unavailable
+                      - service_busy
+              examples:
+                storage_unavailable:
+                  value:
+                    code: storage_unavailable
+                    message: Хранилище недоступно
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                catalog_unavailable:
+                  value:
+                    code: catalog_unavailable
+                    message: Каталог настроен некорректно
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                service_busy:
+                  value:
+                    code: service_busy
+                    message: Очередь заполнена
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '500':
+          description: Непредвиденная ошибка приложения; внутренние данные не раскрываются.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - internal_error
+              examples:
+                internal_error:
+                  value:
+                    code: internal_error
+                    message: Внутренняя ошибка
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+  /jobs/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: UUID задания; известный ID доступен всем клиентам учебного экземпляра.
+      schema:
+        type: string
+        format: uuid
+    get:
+      operationId: getJob
+      summary: Прочитать состояние и сохранённую ошибку
+      description: Чтение существующего Job возвращает HTTP 200 в любом состоянии. После перезапуска прежние running
+        становятся failed с execution_interrupted. Задания created остаются в очереди, конечные состояния сохраняются.
+      responses:
+        '200':
+          description: Сохранённое состояние Job.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              examples:
+                created:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    dataset_id: demo-01
+                    operation: find_duplicates
+                    state: created
+                    image_ids:
+                    - photo-10
+                    - photo-29
+                    - photo-10-copy
+                    catalog_version: '1'
+                    analysis_version: '1'
+                    created_at: '2026-11-10T10:00:00Z'
+                    started_at: null
+                    finished_at: null
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                    error: null
+                running:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    dataset_id: demo-01
+                    operation: find_duplicates
+                    state: running
+                    image_ids:
+                    - photo-10
+                    - photo-29
+                    - photo-10-copy
+                    catalog_version: '1'
+                    analysis_version: '1'
+                    created_at: '2026-11-10T10:00:00Z'
+                    started_at: '2026-11-10T10:00:01Z'
+                    finished_at: null
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                    error: null
+                done:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    dataset_id: demo-01
+                    operation: find_duplicates
+                    state: done
+                    image_ids:
+                    - photo-10
+                    - photo-29
+                    - photo-10-copy
+                    catalog_version: '1'
+                    analysis_version: '1'
+                    created_at: '2026-11-10T10:00:00Z'
+                    started_at: '2026-11-10T10:00:01Z'
+                    finished_at: '2026-11-10T10:00:03Z'
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                    error: null
+                failed:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    dataset_id: demo-01
+                    operation: find_duplicates
+                    state: failed
+                    image_ids:
+                    - photo-10
+                    - photo-29
+                    - photo-10-copy
+                    catalog_version: '1'
+                    analysis_version: '1'
+                    created_at: '2026-11-10T10:00:00Z'
+                    started_at: '2026-11-10T10:00:01Z'
+                    finished_at: '2026-11-10T10:00:33Z'
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                    error:
+                      code: source_timeout
+                      message: Источник не ответил в установленный срок
+                      details:
+                      - field: images.photo-10.content
+                        reason: Три попытки завершились таймаутом
+                cancelled:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    dataset_id: demo-01
+                    operation: find_duplicates
+                    state: cancelled
+                    image_ids:
+                    - photo-10
+                    - photo-29
+                    - photo-10-copy
+                    catalog_version: '1'
+                    analysis_version: '1'
+                    created_at: '2026-11-10T10:00:00Z'
+                    started_at: null
+                    finished_at: '2026-11-10T10:00:01Z'
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                    error: null
+        '404':
+          description: Правильный UUID отсутствующего Job.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - job_not_found
+              examples:
+                job_not_found:
+                  value:
+                    code: job_not_found
+                    message: Задание не найдено
+                    details:
+                    - field: path.id
+                      reason: Job с этим UUID отсутствует
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '422':
+          description: ID не является UUID.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - invalid_request
+              examples:
+                invalid_request:
+                  value:
+                    code: invalid_request
+                    message: Неверное поле запроса
+                    details:
+                    - field: path.id
+                      reason: Ожидается UUID
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '503':
+          description: Невозможно прочитать хранилище.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - storage_unavailable
+              examples:
+                storage_unavailable:
+                  value:
+                    code: storage_unavailable
+                    message: Хранилище недоступно
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '500':
+          description: Непредвиденная ошибка приложения; внутренние данные не раскрываются.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - internal_error
+              examples:
+                internal_error:
+                  value:
+                    code: internal_error
+                    message: Внутренняя ошибка
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+  /jobs/{id}/result:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: UUID задания; известный ID доступен всем клиентам учебного экземпляра.
+      schema:
+        type: string
+        format: uuid
+    get:
+      operationId: getJobResult
+      summary: Прочитать сохранённый полный отчёт
+      description: Только для done. Повторное чтение не вызывает источник и Tool. Нет частичного результата. Число
+        элементов и членство в группах дополнительно проверяются семантически.
+      responses:
+        '200':
+          description: Отчёт выбранной операции; значения примеров условны.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+              examples:
+                duplicates:
+                  value:
+                    job_id: 11111111-1111-4111-8111-111111111111
+                    operation: find_duplicates
+                    analysis_version: '1'
+                    data:
+                      image_count: 3
+                      groups:
+                      - sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+                        image_ids:
+                        - photo-10
+                        - photo-10-copy
+                quality:
+                  value:
+                    job_id: 11111111-1111-4111-8111-111111111111
+                    operation: assess_quality
+                    analysis_version: '1'
+                    data:
+                      image_count: 1
+                      thresholds:
+                        brightness: 40
+                        sharpness: 100
+                      images:
+                      - image_id: dark-01
+                        brightness: 20
+                        sharpness: 0
+                        warnings:
+                        - code: low_brightness
+                          reason: Средняя яркость 20 ниже порога 40
+                        - code: possible_blur
+                          reason: Дисперсия Лапласа 0 ниже порога 100
+        '409':
+          description: Для created и running возвращается result_not_ready, для failed — job_failed, для cancelled
+            — job_cancelled.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - result_not_ready
+                      - job_failed
+                      - job_cancelled
+              examples:
+                result_not_ready:
+                  value:
+                    code: result_not_ready
+                    message: Отчёт ещё не готов
+                    details:
+                    - field: job.state
+                      reason: Job находится в created или running
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                job_failed:
+                  value:
+                    code: job_failed
+                    message: Анализ завершился ошибкой
+                    details:
+                    - field: job.error.code
+                      reason: source_timeout
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                job_cancelled:
+                  value:
+                    code: job_cancelled
+                    message: Задание отменено. Отчёта нет
+                    details:
+                    - field: job.state
+                      reason: cancelled
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '404':
+          description: Правильный UUID отсутствующего Job.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - job_not_found
+              examples:
+                job_not_found:
+                  value:
+                    code: job_not_found
+                    message: Задание не найдено
+                    details:
+                    - field: path.id
+                      reason: Job с этим UUID отсутствует
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '422':
+          description: ID не является UUID.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - invalid_request
+              examples:
+                invalid_request:
+                  value:
+                    code: invalid_request
+                    message: Неверное поле запроса
+                    details:
+                    - field: path.id
+                      reason: Ожидается UUID
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '503':
+          description: Невозможно прочитать хранилище.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - storage_unavailable
+              examples:
+                storage_unavailable:
+                  value:
+                    code: storage_unavailable
+                    message: Хранилище недоступно
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '500':
+          description: Непредвиденная ошибка приложения; внутренние данные не раскрываются.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - internal_error
+              examples:
+                internal_error:
+                  value:
+                    code: internal_error
+                    message: Внутренняя ошибка
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+  /jobs/{id}/cancel:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: UUID задания; известный ID доступен всем клиентам учебного экземпляра.
+      schema:
+        type: string
+        format: uuid
+    post:
+      operationId: cancelJob
+      summary: Отменить ожидающий Job
+      description: Запрос без тела и без ключа идемпотентности. Условное обновление в БД переводит created в cancelled
+        и фиксирует finished_at. Если Runner перешёл в running первым, отмена отклоняется. Повтор отмены возвращает
+        тот же Job и время отмены. Любой клиент учебного экземпляра может отменить ожидающий Job по известному ID.
+      responses:
+        '404':
+          description: Правильный UUID отсутствующего Job.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - job_not_found
+              examples:
+                job_not_found:
+                  value:
+                    code: job_not_found
+                    message: Задание не найдено
+                    details:
+                    - field: path.id
+                      reason: Job с этим UUID отсутствует
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '422':
+          description: ID не является UUID.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - invalid_request
+              examples:
+                invalid_request:
+                  value:
+                    code: invalid_request
+                    message: Неверное поле запроса
+                    details:
+                    - field: path.id
+                      reason: Ожидается UUID
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '503':
+          description: Хранилище недоступно. При неясном результате фиксации повторите отмену.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - storage_unavailable
+              examples:
+                storage_unavailable:
+                  value:
+                    code: storage_unavailable
+                    message: Хранилище недоступно
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '500':
+          description: Непредвиденная ошибка приложения; внутренние данные не раскрываются.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - internal_error
+              examples:
+                internal_error:
+                  value:
+                    code: internal_error
+                    message: Внутренняя ошибка
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '200':
+          description: Job отменён. Повтор отмены возвращает сохранённый Job.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelledJob'
+              examples:
+                cancelled:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    dataset_id: demo-01
+                    operation: find_duplicates
+                    state: cancelled
+                    image_ids:
+                    - photo-10
+                    - photo-29
+                    - photo-10-copy
+                    catalog_version: '1'
+                    analysis_version: '1'
+                    created_at: '2026-11-10T10:00:00Z'
+                    started_at: null
+                    finished_at: '2026-11-10T10:00:01Z'
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                    error: null
+        '409':
+          description: В момент запроса Job уже был в running, done или failed. В details указано текущее состояние
+            job.state.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - job_not_cancellable
+              examples:
+                job_not_cancellable:
+                  value:
+                    code: job_not_cancellable
+                    message: Отмена доступна только до начала обработки
+                    details:
+                    - field: job.state
+                      reason: running
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+  /health:
+    get:
+      operationId: getHealth
+      summary: Проверить готовность БД и обработчика
+      description: Диагностика к практике 7. До завершения проверки старых Job, при отказе БД или остановленном
+        Runner возвращается 503. Адреса БД и секреты не раскрываются.
+      responses:
+        '200':
+          description: БД и Runner готовы.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Healthy'
+              examples:
+                ready:
+                  value:
+                    status: ok
+                    database: ready
+                    runner: ready
+        '503':
+          description: Хранилище или обработчик не готовы.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - storage_unavailable
+                      - service_unavailable
+              examples:
+                storage_unavailable:
+                  value:
+                    code: storage_unavailable
+                    message: Хранилище недоступно
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+                service_unavailable:
+                  value:
+                    code: service_unavailable
+                    message: Обработчик заданий не готов
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+        '500':
+          description: Непредвиденная ошибка приложения; внутренние данные не раскрываются.
+          headers:
+            X-Correlation-ID:
+              description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - properties:
+                    code:
+                      enum:
+                      - internal_error
+              examples:
+                internal_error:
+                  value:
+                    code: internal_error
+                    message: Внутренняя ошибка
+                    details: []
+                    correlation_id: 22222222-2222-4222-8222-222222222222
+components:
+  schemas:
+    Operation:
+      type: string
+      enum:
+      - find_duplicates
+      - assess_quality
+    ImageId:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: ^[A-Za-z0-9_-]+$
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required:
+      - field
+      - reason
+      properties:
+        field:
+          type: string
+          minLength: 1
+        reason:
+          type: string
+          minLength: 1
+    Error:
+      type: object
+      additionalProperties: false
+      required:
+      - code
+      - message
+      - details
+      - correlation_id
+      properties:
+        code:
+          type: string
+          enum:
+          - invalid_json
+          - invalid_request
+          - unknown_operation
+          - unknown_dataset
+          - idempotency_conflict
+          - request_too_large
+          - unsupported_media_type
+          - job_not_found
+          - result_not_ready
+          - job_failed
+          - job_cancelled
+          - job_not_cancellable
+          - storage_unavailable
+          - catalog_unavailable
+          - service_busy
+          - service_unavailable
+          - internal_error
+          - route_not_found
+          - method_not_allowed
+        message:
+          type: string
+          minLength: 1
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+        correlation_id:
+          type: string
+          format: uuid
+    JobFailure:
+      type: object
+      additionalProperties: false
+      required:
+      - code
+      - message
+      - details
+      properties:
+        code:
+          type: string
+          enum:
+          - source_timeout
+          - source_unavailable
+          - source_not_found
+          - source_rejected
+          - source_invalid_response
+          - invalid_image
+          - unsupported_image_format
+          - image_too_large
+          - invalid_tool_input
+          - unknown_operation
+          - execution_interrupted
+          - internal_error
+        message:
+          type: string
+          minLength: 1
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+    CreateJob:
+      type: object
+      additionalProperties: false
+      required:
+      - dataset_id
+      - operation
+      properties:
+        dataset_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: ^[A-Za-z0-9_-]+$
+        operation:
+          $ref: '#/components/schemas/Operation'
+    JobBase:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - dataset_id
+      - operation
+      - state
+      - image_ids
+      - catalog_version
+      - analysis_version
+      - created_at
+      - started_at
+      - finished_at
+      - correlation_id
+      - error
+      properties:
+        id:
+          type: string
+          format: uuid
+        dataset_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: ^[A-Za-z0-9_-]+$
+        operation:
+          $ref: '#/components/schemas/Operation'
+        state:
+          type: string
+          enum:
+          - created
+          - running
+          - done
+          - failed
+          - cancelled
+        image_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImageId'
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+        catalog_version:
+          type: string
+          minLength: 1
+        analysis_version:
+          type: string
+          const: '1'
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        finished_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        correlation_id:
+          type: string
+          format: uuid
+        error:
+          oneOf:
+          - $ref: '#/components/schemas/JobFailure'
+          - type: 'null'
+    DuplicateGroup:
+      type: object
+      additionalProperties: false
+      required:
+      - sha256
+      - image_ids
+      properties:
+        sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+        image_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImageId'
+          minItems: 2
+          maxItems: 10
+          uniqueItems: true
+    DuplicateData:
+      type: object
+      additionalProperties: false
+      required:
+      - image_count
+      - groups
+      properties:
+        image_count:
+          type: integer
+          minimum: 1
+          maximum: 10
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/DuplicateGroup'
+          maxItems: 5
+    Warning:
+      type: object
+      additionalProperties: false
+      required:
+      - code
+      - reason
+      properties:
+        code:
+          type: string
+          enum:
+          - low_brightness
+          - possible_blur
+        reason:
+          type: string
+          minLength: 1
+    QualityImage:
+      type: object
+      additionalProperties: false
+      required:
+      - image_id
+      - brightness
+      - sharpness
+      - warnings
+      properties:
+        image_id:
+          $ref: '#/components/schemas/ImageId'
+        brightness:
+          type: number
+          minimum: 0
+          maximum: 255
+        sharpness:
+          type: number
+          minimum: 0
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Warning'
+          maxItems: 2
+          uniqueItems: true
+    QualityData:
+      type: object
+      additionalProperties: false
+      required:
+      - image_count
+      - thresholds
+      - images
+      properties:
+        image_count:
+          type: integer
+          minimum: 1
+          maximum: 10
+        thresholds:
+          type: object
+          additionalProperties: false
+          required:
+          - brightness
+          - sharpness
+          properties:
+            brightness:
+              type: number
+              const: 40
+            sharpness:
+              type: number
+              const: 100
+        images:
+          type: array
+          items:
+            $ref: '#/components/schemas/QualityImage'
+          minItems: 1
+          maxItems: 10
+    Healthy:
+      type: object
+      additionalProperties: false
+      required:
+      - status
+      - database
+      - runner
+      properties:
+        status:
+          type: string
+          const: ok
+        database:
+          type: string
+          const: ready
+        runner:
+          type: string
+          const: ready
+    CreatedJob:
+      allOf:
+      - $ref: '#/components/schemas/JobBase'
+      - type: object
+        properties:
+          state:
+            const: created
+          started_at:
+            type: 'null'
+          finished_at:
+            type: 'null'
+          error:
+            type: 'null'
+    RunningJob:
+      allOf:
+      - $ref: '#/components/schemas/JobBase'
+      - type: object
+        properties:
+          state:
+            const: running
+          started_at:
+            type: string
+            format: date-time
+          finished_at:
+            type: 'null'
+          error:
+            type: 'null'
+    DoneJob:
+      allOf:
+      - $ref: '#/components/schemas/JobBase'
+      - type: object
+        properties:
+          state:
+            const: done
+          started_at:
+            type: string
+            format: date-time
+          finished_at:
+            type: string
+            format: date-time
+          error:
+            type: 'null'
+    FailedJob:
+      allOf:
+      - $ref: '#/components/schemas/JobBase'
+      - type: object
+        properties:
+          state:
+            const: failed
+          started_at:
+            type: string
+            format: date-time
+          finished_at:
+            type: string
+            format: date-time
+          error:
+            $ref: '#/components/schemas/JobFailure'
+    CancelledJob:
+      allOf:
+      - $ref: '#/components/schemas/JobBase'
+      - type: object
+        properties:
+          state:
+            const: cancelled
+          started_at:
+            type: 'null'
+          finished_at:
+            type: string
+            format: date-time
+          error:
+            type: 'null'
+    Job:
+      oneOf:
+      - $ref: '#/components/schemas/CreatedJob'
+      - $ref: '#/components/schemas/RunningJob'
+      - $ref: '#/components/schemas/DoneJob'
+      - $ref: '#/components/schemas/FailedJob'
+      - $ref: '#/components/schemas/CancelledJob'
+    DuplicateReport:
+      type: object
+      additionalProperties: false
+      required:
+      - job_id
+      - operation
+      - analysis_version
+      - data
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        operation:
+          type: string
+          const: find_duplicates
+        analysis_version:
+          type: string
+          const: '1'
+        data:
+          $ref: '#/components/schemas/DuplicateData'
+    QualityReport:
+      type: object
+      additionalProperties: false
+      required:
+      - job_id
+      - operation
+      - analysis_version
+      - data
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        operation:
+          type: string
+          const: assess_quality
+        analysis_version:
+          type: string
+          const: '1'
+        data:
+          $ref: '#/components/schemas/QualityData'
+    Report:
+      oneOf:
+      - $ref: '#/components/schemas/DuplicateReport'
+      - $ref: '#/components/schemas/QualityReport'
+  responses:
+    RouteNotFound:
+      description: Любой неизвестный путь, включая /jobs/{id}/restart.
+      headers:
+        X-Correlation-ID:
+          description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+          schema:
+            type: string
+            format: uuid
+      content:
+        application/json:
+          schema:
+            allOf:
+            - $ref: '#/components/schemas/Error'
+            - properties:
+                code:
+                  enum:
+                  - route_not_found
+          examples:
+            route_not_found:
+              value:
+                code: route_not_found
+                message: Маршрут не найден
+                details:
+                - field: path
+                  reason: Эта операция API не поддерживается
+                correlation_id: 22222222-2222-4222-8222-222222222222
+    MethodNotAllowed:
+      description: Неподдерживаемый метод известного пути; Job не меняется.
+      headers:
+        X-Correlation-ID:
+          description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
+          schema:
+            type: string
+            format: uuid
+        Allow:
+          description: Разрешённые методы известного пути.
+          schema:
+            type: string
+          example: GET
+      content:
+        application/json:
+          schema:
+            allOf:
+            - $ref: '#/components/schemas/Error'
+            - properties:
+                code:
+                  enum:
+                  - method_not_allowed
+          examples:
+            method_not_allowed:
+              value:
+                code: method_not_allowed
+                message: Метод не поддерживается
+                details:
+                - field: method
+                  reason: Используйте метод из заголовка Allow
+                correlation_id: 22222222-2222-4222-8222-222222222222
+x-routing-errors:
+  unknown-path:
+    status: 404
+    response: '#/components/responses/RouteNotFound'
+  unsupported-method:
+    status: 405
+    response: '#/components/responses/MethodNotAllowed'
+  note: Доступные операции перечислены в paths.
+x-limits:
+  request-body-bytes: 8192
+  dataset-images: 10
+  file-bytes: 5242880
+  image-pixels: 12000000
+  nonterminal-jobs: 20
+  running-jobs: 1
+  http-attempt-seconds: 10
+  additional-attempts: 2
+  redirects-per-attempt: 3
