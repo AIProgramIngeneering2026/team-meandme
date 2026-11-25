@@ -1,4 +1,4 @@
-"""Жизненный цикл одного задания в памяти."""
+"""Жизненный цикл задания и правила переходов."""
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -58,6 +58,13 @@ class AnalysisJob:
             state=JobState.CREATED,
             created_at=datetime.now(UTC),
         )
+
+    @classmethod
+    def restore(cls, snapshot: JobSnapshot) -> "AnalysisJob":
+        job = cls.__new__(cls)
+        job._lock = Lock()
+        job._snapshot = deepcopy(snapshot)
+        return job
 
     @property
     def operation(self) -> str:
