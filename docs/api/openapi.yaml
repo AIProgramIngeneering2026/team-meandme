@@ -2,12 +2,12 @@ openapi: 3.1.0
 info:
   title: meandme — анализ фотогалереи
   version: 1.0.0
-  description: Контракт практики 2 для общего учебного экземпляра. Отмена доступна для ожидающих заданий. Семантика,
+  description: Контракт общего учебного экземпляра. Отмена доступна для ожидающих заданий. Семантика,
     лимиты и общий роутинг описаны в docs/api/README.md. Все ответы приложения используют JSON и X-Correlation-ID.
     Даты UTC.
 servers:
 - url: http://localhost:8000
-  description: Адрес будущего локального запуска
+  description: Адрес локального запуска
 security: []
 paths:
   /jobs:
@@ -803,7 +803,7 @@ paths:
                       reason: Job с этим UUID отсутствует
                     correlation_id: 22222222-2222-4222-8222-222222222222
         '422':
-          description: ID не является UUID.
+          description: Неверный UUID либо передано тело или Idempotency-Key.
           headers:
             X-Correlation-ID:
               description: UUID текущего HTTP-обращения; в Error совпадает с correlation_id.
@@ -937,7 +937,7 @@ paths:
     get:
       operationId: getHealth
       summary: Проверить готовность БД и обработчика
-      description: Диагностика к практике 7. До завершения проверки старых Job, при отказе БД или остановленном
+      description: До завершения проверки старых Job, при отказе БД или остановленном
         Runner возвращается 503. Адреса БД и секреты не раскрываются.
       responses:
         '200':
