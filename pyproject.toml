@@ -6,10 +6,23 @@ build-backend = "setuptools.build_meta"
 name = "meandme"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["numpy>=2,<3", "Pillow>=11,<13"]
+dependencies = [
+    "alembic>=1.14,<2",
+    "fastapi>=0.115,<1",
+    "numpy>=2,<3",
+    "Pillow>=11,<13",
+    "SQLAlchemy>=2,<3",
+    "uvicorn>=0.34,<1",
+]
 
 [dependency-groups]
-dev = ["pytest>=8,<10"]
+dev = [
+    "httpx2>=2,<3",
+    "jsonschema==4.23.0",
+    "openapi-spec-validator==0.7.2",
+    "PyYAML==6.0.2",
+    "pytest>=8,<10",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -73,7 +73,7 @@ HTTP-запрос → Job в очереди → Runner → Dispatcher → Tool �
 
 ## Стек и API
 
-Python 3.12, FastAPI, Pydantic, Pillow, NumPy, HTTPX, SQLAlchemy и Alembic. В прототипе используется SQLite; к практике 7 хранилище переводится на PostgreSQL отдельным сервисом. Тесты — pytest; CI — GitHub Actions; запуск — Docker Compose.
+Прототип использует Python 3.12, FastAPI, Pillow, NumPy, SQLAlchemy, SQLite и Alembic. Тесты запускаются через pytest. Переход на PostgreSQL и Docker Compose запланирован к практике 7.
 
 | Метод и путь | Назначение |
 |---|---|
@@ -85,19 +85,39 @@ Python 3.12, FastAPI, Pydantic, Pillow, NumPy, HTTPX, SQLAlchemy и Alembic. В 
 
 Машиночитаемый контракт — [OpenAPI](docs/api/openapi.yaml), пояснения — [правила HTTP API](docs/api/README.md). Критерии приёмки приведены в [требованиях](docs/requirements.md).
 
-## Запуск тестов ядра
+## Локальный запуск
 
 Из корня репозитория с установленным `uv`:
+
+```sh
+uv run --python 3.12 --locked alembic upgrade head
+uv run --python 3.12 --locked uvicorn meandme.api:create_app --factory --host 127.0.0.1 --port 8000 --workers 1
+```
+
+По умолчанию используется файл `meandme.sqlite3` в текущей папке. Для другого файла задайте один и тот же `MEANDME_DB` при миграции и запуске. Для сохранения результатов после перезапуска используйте тот же файл. Прототип рассчитан на один процесс Uvicorn и один Runner.
+
+`demo-01` локально использует два синтетических JPEG и копию первого. Запуск и тесты работают без внешней сети после установки зависимостей. Подключение Picsum относится к практике 6.
+
+```sh
+curl -i http://127.0.0.1:8000/jobs \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: demo-$(uuidgen)" \
+  -d '{"dataset_id":"demo-01","operation":"find_duplicates"}'
+```
+
+Ответ `202` содержит путь задания в заголовке `Location`. Вызовите `GET` по этому пути, а после состояния `done` добавьте к нему `/result`. Повтор исходного POST с тем же ключом и полями вернёт `200` и текущее состояние того же Job.
+
+## Запуск тестов
 
 ```sh
 uv run --python 3.12 --locked pytest
 ```
 
-Тесты создают небольшие JPEG и PNG в памяти. Для запуска достаточно Python и зависимостей из `uv.lock`.
+Тесты используют локальные JPEG/PNG и временные файлы SQLite. Они проверяют HTTP-ответы по OpenAPI, миграцию пустой БД, повтор с ключом, восстановление после перезапуска и откат при сбое записи результата.
 
 ## Ядро практики 3
 
-- [AnalysisJob](src/meandme/job.py) хранит состояние, время переходов и итог. Переход из `created` защищён блокировкой, поэтому старт и отмена не могут пройти одновременно. `mark_interrupted()` завершает оставшийся `running` с кодом `execution_interrupted`. При подключении хранилища эту команду вызывает процедура восстановления на старте.
+- [AnalysisJob](src/meandme/job.py) хранит состояние, время переходов и итог. Переход из `created` защищён блокировкой, поэтому старт и отмена не могут пройти одновременно. `mark_interrupted()` завершает оставшийся `running` с кодом `execution_interrupted`. При запуске API Runner вызывает эту команду для сохранённых `running`. Задания в `created` остаются в очереди.
 - [Registry и Dispatcher](src/meandme/dispatch.py) выбирают Tool и выполняют задание над подготовленным набором. `run(job, request)` ведёт Job через состояния. Вызов `execute(operation, request)` сохранён для Runner, который сам ведёт Job и загрузку файлов по архитектуре p2.
 - [DuplicateFinder и QualityAnalyzer](src/meandme/analysis.py) возвращают предусмотренные контрактом данные. `prepare_image()` проверяет файлы до передачи в Tool, а каждый Tool проверяет параметры своего входа. [Проверка изображений](src/meandme/images.py)
 
@@ -108,7 +128,7 @@ uv run --python 3.12 --locked pytest
 - Практика 1: README, требования, backlog в Issues, правила работы и заявка на тему.
 - Практики 2–4: контракты, доменное ядро, API и хранение с миграциями.
 - Практики 5–6: автоматические тесты, CI, сетевой адаптер и fake-сервис.
-- К практике 7: логи с `correlation_id`/`job_id`, health check, конфигурация из окружения, PostgreSQL и запуск из чистого клона.
+- К практике 7: расширенная диагностика, конфигурация из окружения, PostgreSQL и запуск из чистого клона.
 
 Для приложения запланирован запуск через `docker compose up --build`. Автоматическая проверка сетевого адаптера будет использовать управляемый источник, а демонстрация интеграции — Picsum.
 
@@ -117,7 +137,7 @@ uv run --python 3.12 --locked pytest
 Это проверка документов, без запуска сервера. Python 3.12 или новее:
 
 ```sh
-uv run --python 3.12 --with-requirements requirements-contract.txt python tools/check_contract.py
+uv run --python 3.12 --locked python tools/check_contract.py
 ```
 
 Скрипт проверяет OpenAPI 3.1, ссылки внутри схем, JSON-примеры и отклонение некорректных данных. Он не проверяет работу HTTP, БД или Picsum.
